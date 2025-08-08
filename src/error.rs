@@ -17,6 +17,8 @@ pub enum PdError {
     /// An error occurred during audio initialization.
     #[error(transparent)]
     AudioInitializationError(#[from] AudioInitializationError),
+    #[error(transparent)]
+    RecieveError(#[from] RecieveError),
     /// An error occurred during patch lifecycle.
     #[error(transparent)]
     PatchLifeCycleError(#[from] PatchLifeCycleError),
@@ -72,6 +74,15 @@ pub enum AudioInitializationError {
     /// A failure happened in pd audio initialization with an unknown reason.
     #[error("An unknown error occurred in Pure Data audio initialization.")]
     InitializationFailed,
+}
+
+/// Errors related to audio initialization.
+#[non_exhaustive]
+#[derive(Error, Debug)]
+pub enum RecieveError {
+    /// The DSP was active while registering the callback
+    #[error("Audio playback needs to be off when registering this callback.")]
+    DspActive,
 }
 
 /// Errors related to a lifecycle of a pd patch.
@@ -143,6 +154,12 @@ pub enum SendError {
     /// `CString` or `CStr` conversion error.
     #[error(transparent)]
     StringConversion(#[from] StringConversionError),
+    /// Data was added to a non-existant message.
+    #[error("Message must be started with start_message before adding to it.")]
+    MessageNotStarted,
+    /// Message was started while another message was already started.
+    #[error("Message must be submitted before starting a new message.")]
+    MessageAlreadyStarted,
 }
 
 /// Errors related to subscription to senders in a pd patch.

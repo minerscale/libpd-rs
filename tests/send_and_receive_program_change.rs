@@ -2,13 +2,7 @@
 
 use std::sync::{mpsc, Arc, Mutex};
 
-use libpd_rs::{
-    functions::{
-        block_size, close_patch, open_patch, receive::on_midi_program_change,
-        send::send_program_change, util::dsp_on,
-    },
-    Pd,
-};
+use libpd_rs::{functions::block_size, Pd};
 
 #[test]
 fn send_and_receive_program_change() {
@@ -18,20 +12,20 @@ fn send_and_receive_program_change() {
     let program_change_messages_received: Arc<Mutex<Vec<(i32, i32)>>> =
         Arc::new(Mutex::new(vec![]));
 
-    let pd = Pd::init_and_configure(0, output_channels, sample_rate).unwrap();
+    let mut pd = Pd::init_and_configure(0, output_channels, sample_rate).unwrap();
     let ctx = pd.audio_context();
 
-    dsp_on().unwrap();
-
-    let patch_handle = open_patch("tests/patches/echo.pd").unwrap();
+    pd.open_patch("tests/patches/echo.pd").unwrap();
 
     let messages_to_fill = program_change_messages_received.clone();
-    on_midi_program_change(move |channel, program_number| {
+    pd.on_midi_program_change(move |channel, program_number| {
         messages_to_fill
             .lock()
             .unwrap()
             .push((channel, program_number));
     });
+
+    pd.dsp_on().unwrap();
 
     let (tx, rx) = mpsc::channel::<()>();
 
@@ -65,7 +59,7 @@ fn send_and_receive_program_change() {
     #[allow(clippy::explicit_counter_loop)]
     // Send 5 note on messages in sequence.
     for _ in 0..5 {
-        send_program_change(channel, program_number).unwrap();
+        pd.send_program_change(channel, program_number).unwrap();
         channel += 1;
         program_number += 1;
     }
@@ -90,5 +84,5 @@ fn send_and_receive_program_change() {
             assert_eq!(p1, p2);
         });
 
-    close_patch(patch_handle).unwrap();
+    pd.close_patch().unwrap();
 }

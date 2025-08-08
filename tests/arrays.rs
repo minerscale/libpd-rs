@@ -1,18 +1,18 @@
 #![allow(clippy::restriction)]
 
-use libpd_rs::functions::{
-    array::{
+use libpd_rs::{
+    functions::array::{
         array_size, read_double_array_from, read_float_array_from, resize_array,
         write_double_array_to, write_float_array_to,
     },
-    close_patch,
+    Pd,
 };
 
 #[test]
 fn apply_array_operations_in_a_row() {
-    libpd_rs::functions::init().unwrap();
+    let mut pd = Pd::init_and_configure(0, 2, 44100).unwrap();
 
-    let handle = libpd_rs::functions::open_patch("tests/patches/array_sketch_pad.pd").unwrap();
+    pd.open_patch("tests/patches/array_sketch_pad.pd").unwrap();
 
     let bad_name = "not_exists";
     let sketch_pad = "sketch_pad";
@@ -116,5 +116,5 @@ fn apply_array_operations_in_a_row() {
     let result = read_float_array_from(sketch_pad, 0, -1, &mut read_to);
     assert!(result.is_err());
 
-    close_patch(handle).unwrap();
+    pd.close_patch().unwrap();
 }

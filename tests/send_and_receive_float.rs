@@ -2,15 +2,7 @@
 
 use std::sync::{mpsc, Arc, Mutex};
 
-use libpd_rs::{
-    functions::{
-        block_size, close_patch, open_patch,
-        receive::{on_float, start_listening_from, stop_listening_from},
-        send::send_float_to,
-        util::dsp_on,
-    },
-    Pd,
-};
+use libpd_rs::{functions::block_size, Pd};
 
 #[test]
 fn send_and_receive_float() {
@@ -19,19 +11,20 @@ fn send_and_receive_float() {
 
     let floats: Arc<Mutex<Vec<f32>>> = Arc::new(Mutex::new(vec![]));
 
-    let pd = Pd::init_and_configure(0, output_channels, sample_rate).unwrap();
+    let mut pd = Pd::init_and_configure(0, output_channels, sample_rate).unwrap();
     let ctx = pd.audio_context();
 
-    dsp_on().unwrap();
-
-    let patch_handle = open_patch("tests/patches/echo.pd").unwrap();
+    pd.open_patch("tests/patches/echo.pd").unwrap();
 
     let floats_to_fill = floats.clone();
-    on_float(move |source, value| {
+    pd.on_float(move |source, value| {
         assert_eq!(source, "float_from_pd");
         floats_to_fill.lock().unwrap().push(value);
-    });
-    let receiver_handle = start_listening_from("float_from_pd").unwrap();
+    })
+    .unwrap();
+    let receiver_handle = pd.start_listening_from("float_from_pd").unwrap();
+
+    pd.dsp_on().unwrap();
 
     let (tx, rx) = mpsc::channel::<()>();
 
@@ -62,11 +55,11 @@ fn send_and_receive_float() {
     let mut float: f32 = 2.0;
     // Send 5 floats in sequence.
     for _ in 0..5 {
-        send_float_to("float_from_rust", float).unwrap();
+        pd.send_float_to("float_from_rust", float).unwrap();
         float *= 2.0;
     }
-    send_float_to("float_from_rust", f32::MAX).unwrap();
-    send_float_to("float_from_rust", f32::MIN).unwrap();
+    pd.send_float_to("float_from_rust", f32::MAX).unwrap();
+    pd.send_float_to("float_from_rust", f32::MIN).unwrap();
     std::thread::sleep(std::time::Duration::from_millis(50));
 
     // Stop pd.
@@ -89,6 +82,6 @@ fn send_and_receive_float() {
     assert_eq!(f32::MIN, floats.lock().unwrap()[6]);
 
     // Stop listening and close handle.
-    stop_listening_from(receiver_handle);
-    close_patch(patch_handle).unwrap();
+    pd.stop_listening_from(receiver_handle);
+    pd.close_patch().unwrap();
 }

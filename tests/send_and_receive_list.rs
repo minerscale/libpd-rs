@@ -2,18 +2,7 @@
 
 use std::sync::{mpsc, Arc, Mutex};
 
-use libpd_rs::{
-    functions::{
-        block_size, close_patch, open_patch,
-        receive::{on_list, start_listening_from, stop_listening_from},
-        send::{
-            add_double_to_started_message, add_symbol_to_started_message,
-            finish_message_as_list_and_send_to, send_list_to, start_message,
-        },
-        util::dsp_on,
-    },
-    Pd,
-};
+use libpd_rs::{functions::block_size, Pd};
 
 use libpd_rs::Atom;
 
@@ -24,21 +13,22 @@ fn send_and_receive_list() {
 
     let list_received: Arc<Mutex<Vec<Atom>>> = Arc::new(Mutex::new(vec![]));
 
-    let pd = Pd::init_and_configure(0, output_channels, sample_rate).unwrap();
+    let mut pd = Pd::init_and_configure(0, output_channels, sample_rate).unwrap();
     let ctx = pd.audio_context();
 
-    dsp_on().unwrap();
-
-    let patch_handle = open_patch("tests/patches/echo.pd").unwrap();
+    pd.open_patch("tests/patches/echo.pd").unwrap();
 
     let list_to_fill = list_received.clone();
-    on_list(move |source, list| {
+    pd.on_list(move |source, list| {
         assert_eq!(source, "list_from_pd");
         for atom in list {
             list_to_fill.lock().unwrap().push(atom.clone());
         }
-    });
-    let receiver_handle = start_listening_from("list_from_pd").unwrap();
+    })
+    .unwrap();
+    let receiver_handle = pd.start_listening_from("list_from_pd").unwrap();
+
+    pd.dsp_on().unwrap();
 
     let (tx, rx) = mpsc::channel::<()>();
 
@@ -89,16 +79,17 @@ fn send_and_receive_list() {
         0.0_f64.into(),
     ];
 
-    send_list_to("list_from_rust", &list_to_send).unwrap();
+    pd.send_list_to("list_from_rust", &list_to_send).unwrap();
 
-    start_message(list_to_send.len() as i32).unwrap();
-    add_symbol_to_started_message("daisy").unwrap();
-    add_double_to_started_message(33.5_f64);
-    add_double_to_started_message(42_f64);
-    add_symbol_to_started_message("bang").unwrap();
-    add_double_to_started_message(12.0_f64);
-    add_double_to_started_message(0.0_f64);
-    finish_message_as_list_and_send_to("list_from_rust").unwrap();
+    pd.start_message(list_to_send.len() as i32).unwrap();
+    pd.add_symbol_to_started_message("daisy").unwrap();
+    pd.add_double_to_started_message(33.5_f64).unwrap();
+    pd.add_double_to_started_message(42_f64).unwrap();
+    pd.add_symbol_to_started_message("bang").unwrap();
+    pd.add_double_to_started_message(12.0_f64).unwrap();
+    pd.add_double_to_started_message(0.0_f64).unwrap();
+    pd.finish_message_as_list_and_send_to("list_from_rust")
+        .unwrap();
 
     std::thread::sleep(std::time::Duration::from_millis(50));
 
@@ -118,6 +109,6 @@ fn send_and_receive_list() {
         });
 
     // Stop listening and close handle.
-    stop_listening_from(receiver_handle);
-    close_patch(patch_handle).unwrap();
+    pd.stop_listening_from(receiver_handle);
+    pd.close_patch().unwrap();
 }

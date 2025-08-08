@@ -34,7 +34,7 @@ impl Atom {
                     a_type: libpd_sys::t_atomtype_A_FLOAT,
                     a_w: libpd_sys::word { w_float: 0.0 },
                 };
-                let p = &mut t_atom as *mut libpd_sys::t_atom;
+                let p = &raw mut t_atom;
                 unsafe {
                     libpd_sys::libpd_set_double(p, *value);
                 }

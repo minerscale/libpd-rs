@@ -2,13 +2,7 @@
 
 use std::sync::{mpsc, Arc, Mutex};
 
-use libpd_rs::{
-    functions::{
-        block_size, close_patch, open_patch, receive::on_midi_pitch_bend, send::send_pitch_bend,
-        util::dsp_on,
-    },
-    Pd,
-};
+use libpd_rs::{functions::block_size, Pd};
 
 #[test]
 fn send_and_receive_pitch_bend() {
@@ -17,20 +11,20 @@ fn send_and_receive_pitch_bend() {
 
     let pitch_bend_messages_received: Arc<Mutex<Vec<(i32, i32)>>> = Arc::new(Mutex::new(vec![]));
 
-    let pd = Pd::init_and_configure(0, output_channels, sample_rate).unwrap();
+    let mut pd = Pd::init_and_configure(0, output_channels, sample_rate).unwrap();
     let ctx = pd.audio_context();
 
-    dsp_on().unwrap();
-
-    let patch_handle = open_patch("tests/patches/echo.pd").unwrap();
+    pd.open_patch("tests/patches/echo.pd").unwrap();
 
     let messages_to_fill = pitch_bend_messages_received.clone();
-    on_midi_pitch_bend(move |channel, bend_amount| {
+    pd.on_midi_pitch_bend(move |channel, bend_amount| {
         messages_to_fill
             .lock()
             .unwrap()
             .push((channel, bend_amount));
     });
+
+    pd.dsp_on().unwrap();
 
     let (tx, rx) = mpsc::channel::<()>();
 
@@ -64,7 +58,7 @@ fn send_and_receive_pitch_bend() {
     #[allow(clippy::explicit_counter_loop)]
     // Send 5 note on messages in sequence.
     for _ in 0..5 {
-        send_pitch_bend(channel, bend_amount).unwrap();
+        pd.send_pitch_bend(channel, bend_amount).unwrap();
         channel += 1;
         bend_amount += 1000;
     }
@@ -96,5 +90,5 @@ fn send_and_receive_pitch_bend() {
             assert_eq!(p1, p2);
         });
 
-    close_patch(patch_handle).unwrap();
+    pd.close_patch().unwrap();
 }

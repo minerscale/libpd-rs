@@ -1,24 +1,41 @@
 #![allow(clippy::restriction)]
 
-use libpd_rs::functions::{
-    close_patch, init, initialize_audio, open_patch,
-    send::{
-        add_double_to_started_message, finish_message_as_list_and_send_to,
-        finish_message_as_typed_message_and_send_to, start_message,
-    },
-    util::dsp_on,
-};
+use libpd_rs::{error::SendError, Pd};
 
 #[test]
 fn message_building() {
     let sample_rate = 44100;
     let output_channels = 2;
 
-    init().unwrap();
-    initialize_audio(0, output_channels, sample_rate).unwrap();
-    dsp_on().unwrap();
+    let mut pd = Pd::init_and_configure(0, output_channels, sample_rate).unwrap();
+    pd.activate_audio(true).unwrap();
 
-    let patch_handle = open_patch("tests/patches/echo.pd").unwrap();
+    pd.open_patch("tests/patches/echo.pd").unwrap();
+
+    assert!(matches!(
+        pd.finish_message_as_list_and_send_to("not_started"),
+        Err(libpd_rs::error::SendError::MessageNotStarted)
+    ));
+
+    pd.start_message(1).unwrap();
+    assert!(pd.add_float_to_started_message(0.0).is_ok());
+    assert!(matches!(
+        pd.add_float_to_started_message(1.0),
+        Err(libpd_rs::error::SendError::OutOfRange)
+    ));
+
+    assert!(pd.finish_message_as_list_and_send_to("no_land").is_err());
+
+    pd.start_message(5).unwrap();
+
+    for _ in 0..5 {
+        pd.add_float_to_started_message(0.0).unwrap();
+    }
+
+    assert!(matches!(
+        pd.finish_message_as_typed_message_and_send_to("jeff", "yuh_oh"),
+        Err(SendError::OutOfRange)
+    ));
 
     // The implementation in libpd looks like, where maxlen is the length of the message:
     // t_atom *v = realloc(s_argv, maxlen * sizeof(t_atom));
@@ -34,22 +51,22 @@ fn message_building() {
     //
     // So it is platform dependent for example, it depends on how much memory a process can allocate I guess if this function errors or not.
     // It would be wise to handle the result.
-    if start_message(i32::MAX).is_ok() {
-        add_double_to_started_message(0.23);
+    if pd.start_message(i32::MAX).is_ok() {
+        pd.add_double_to_started_message(0.23).unwrap();
 
-        let result = finish_message_as_list_and_send_to("no_land");
+        let result = pd.finish_message_as_list_and_send_to("no_land");
         assert!(result.is_err());
-        let result = finish_message_as_typed_message_and_send_to("no_land", "no_where");
+        let result = pd.finish_message_as_typed_message_and_send_to("no_land", "no_where");
         assert!(result.is_err());
     } else {
-        start_message(1).unwrap();
-        add_double_to_started_message(0.23);
+        pd.start_message(1).unwrap();
+        pd.add_double_to_started_message(0.23).unwrap();
 
-        let result = finish_message_as_list_and_send_to("no_land");
+        let result = pd.finish_message_as_list_and_send_to("no_land");
         assert!(result.is_err());
-        let result = finish_message_as_typed_message_and_send_to("no_land", "no_where");
+        let result = pd.finish_message_as_typed_message_and_send_to("no_land", "no_where");
         assert!(result.is_err());
     }
 
-    close_patch(patch_handle).unwrap();
+    pd.close_patch().unwrap();
 }

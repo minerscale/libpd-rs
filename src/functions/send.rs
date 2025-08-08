@@ -367,12 +367,12 @@ pub fn finish_message_as_typed_message_and_send_to<T: AsRef<str>, S: AsRef<str>>
 /// # Errors
 ///
 /// A list of errors that can occur:
-/// - [`SendError`](crate::error::SendError)
+/// - [`SendError`]
 ///    - [`MissingDestination`](crate::error::SendError::MissingDestination)
 ///    - [`StringConversion`](crate::error::SendError::StringConversion)
 /// - [`InstanceError`](crate::error::InstanceError)
 ///    - [`NoCurrentInstanceSet`](crate::error::InstanceError::NoCurrentInstanceSet)
-/// - [`PdError`](crate::error::PdError)
+/// - [`PdError`]
 ///    - [`StringConversion`](crate::error::PdError::StringConversion)
 pub fn send_list_to<T: AsRef<str>>(receiver: T, list: &[Atom]) -> Result<(), PdError> {
     let recv = CString::new(receiver.as_ref()).map_err(StringConversionError::from)?;
@@ -423,12 +423,12 @@ pub fn send_list_to<T: AsRef<str>>(receiver: T, list: &[Atom]) -> Result<(), PdE
 /// # Errors
 ///
 /// A list of errors that can occur:
-/// - [`SendError`](crate::error::SendError)
+/// - [`SendError`]
 ///    - [`MissingDestination`](crate::error::SendError::MissingDestination)
 ///    - [`StringConversion`](crate::error::SendError::StringConversion)
 /// - [`InstanceError`](crate::error::InstanceError)
 ///    - [`NoCurrentInstanceSet`](crate::error::InstanceError::NoCurrentInstanceSet)
-/// - [`PdError`](crate::error::PdError)
+/// - [`PdError`]
 ///    - [`StringConversion`](crate::error::PdError::StringConversion)
 pub fn send_message_to<T: AsRef<str>>(
     receiver: T,

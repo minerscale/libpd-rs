@@ -2,13 +2,7 @@
 
 use std::sync::{mpsc, Arc, Mutex};
 
-use libpd_rs::{
-    functions::{
-        block_size, close_patch, open_patch, receive::on_midi_note_on, send::send_note_on,
-        util::dsp_on,
-    },
-    Pd,
-};
+use libpd_rs::{functions::block_size, Pd};
 
 #[test]
 fn send_and_receive_note_on() {
@@ -17,20 +11,20 @@ fn send_and_receive_note_on() {
 
     let note_on_messages_received: Arc<Mutex<Vec<(i32, i32, i32)>>> = Arc::new(Mutex::new(vec![]));
 
-    let pd = Pd::init_and_configure(0, output_channels, sample_rate).unwrap();
+    let mut pd = Pd::init_and_configure(0, output_channels, sample_rate).unwrap();
     let ctx = pd.audio_context();
 
-    dsp_on().unwrap();
-
-    let patch_handle = open_patch("tests/patches/echo.pd").unwrap();
+    pd.open_patch("tests/patches/echo.pd").unwrap();
 
     let messages_to_fill = note_on_messages_received.clone();
-    on_midi_note_on(move |channel, pitch, velocity| {
+    pd.on_midi_note_on(move |channel, pitch, velocity| {
         messages_to_fill
             .lock()
             .unwrap()
             .push((channel, pitch, velocity));
     });
+
+    pd.dsp_on().unwrap();
 
     let (tx, rx) = mpsc::channel::<()>();
 
@@ -65,7 +59,7 @@ fn send_and_receive_note_on() {
     #[allow(clippy::explicit_counter_loop)]
     // Send 5 note on messages in sequence.
     for _ in 0..5 {
-        send_note_on(channel, pitch, velocity).unwrap();
+        pd.send_note_on(channel, pitch, velocity).unwrap();
         channel += 1;
         pitch += 1;
         velocity += 1;
@@ -91,5 +85,5 @@ fn send_and_receive_note_on() {
             assert_eq!(v1, v2);
         });
 
-    close_patch(patch_handle).unwrap();
+    pd.close_patch().unwrap();
 }

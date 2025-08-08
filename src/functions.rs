@@ -425,6 +425,10 @@ use std::{env, path};
 /// - [`RingBufferInitializationError`](crate::error::InitializationError::RingBufferInitializationError)
 /// - [`InitializationFailed`](crate::error::InitializationError::InitializationFailed)
 pub fn init() -> Result<(), InitializationError> {
+    // libpd prints a bunch of guff to stderr when loading, which is not desirable for a library
+    // so we try to prevent it from printing that info to stderr.
+    let _gag = gag::Gag::stderr();
+
     unsafe {
         match libpd_sys::libpd_queued_init() {
             // Returns -1 if it is already initialized which we ignore.
@@ -677,7 +681,7 @@ pub fn block_size() -> i32 {
 /// Initializes audio rendering
 ///
 /// This doesn't mean that the audio is actually playing.
-/// To start audio processing please call [`dsp_on`](crate::util::dsp_on) function after the initialization.
+/// To start audio processing please call [`dsp_on`](crate::functions::util::dsp_on) function after the initialization.
 ///
 /// # Errors
 ///

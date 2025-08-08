@@ -2,15 +2,7 @@
 
 use std::sync::{mpsc, Arc, Mutex};
 
-use libpd_rs::{
-    functions::{
-        block_size, close_patch, open_patch,
-        receive::{on_bang, start_listening_from, stop_listening_from},
-        send::send_bang_to,
-        util::dsp_on,
-    },
-    Pd,
-};
+use libpd_rs::{functions::block_size, Pd};
 
 #[test]
 fn send_and_receive_bang() {
@@ -19,19 +11,20 @@ fn send_and_receive_bang() {
 
     let bangs: Arc<Mutex<Vec<&str>>> = Arc::new(Mutex::new(vec![]));
 
-    let pd = Pd::init_and_configure(0, output_channels, sample_rate).unwrap();
+    let mut pd = Pd::init_and_configure(0, output_channels, sample_rate).unwrap();
     let ctx = pd.audio_context();
 
-    dsp_on().unwrap();
-
-    let patch_handle = open_patch("tests/patches/echo.pd").unwrap();
+    pd.open_patch("tests/patches/echo.pd").unwrap();
 
     let bangs_to_fill = bangs.clone();
-    on_bang(move |source| {
+    pd.on_bang(move |source| {
         assert_eq!(source, "bang_from_pd");
         bangs_to_fill.lock().unwrap().push("bang");
-    });
-    let receiver_handle = start_listening_from("bang_from_pd").unwrap();
+    })
+    .unwrap();
+
+    let receiver_handle = pd.start_listening_from("bang_from_pd").unwrap();
+    pd.dsp_on().unwrap();
 
     let (tx, rx) = mpsc::channel::<()>();
 
@@ -61,7 +54,7 @@ fn send_and_receive_bang() {
 
     // Send 5 bangs.
     for _ in 0..5 {
-        send_bang_to("bang_from_rust").unwrap();
+        pd.send_bang_to("bang_from_rust").unwrap();
     }
 
     std::thread::sleep(std::time::Duration::from_millis(50));
@@ -73,6 +66,6 @@ fn send_and_receive_bang() {
     assert_eq!(bangs.lock().unwrap().len(), 5);
 
     // Stop listening and close handle.
-    stop_listening_from(receiver_handle);
-    close_patch(patch_handle).unwrap();
+    pd.stop_listening_from(receiver_handle);
+    pd.close_patch().unwrap();
 }

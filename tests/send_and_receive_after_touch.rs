@@ -2,13 +2,7 @@
 
 use std::sync::{mpsc, Arc, Mutex};
 
-use libpd_rs::{
-    functions::{
-        block_size, close_patch, open_patch, receive::on_midi_after_touch, send::send_after_touch,
-        util::dsp_on,
-    },
-    Pd,
-};
+use libpd_rs::{functions::block_size, Pd};
 
 #[test]
 fn send_and_receive_after_touch() {
@@ -17,17 +11,17 @@ fn send_and_receive_after_touch() {
 
     let after_touch_messages_received: Arc<Mutex<Vec<(i32, i32)>>> = Arc::new(Mutex::new(vec![]));
 
-    let pd = Pd::init_and_configure(0, output_channels, sample_rate).unwrap();
+    let mut pd = Pd::init_and_configure(0, output_channels, sample_rate).unwrap();
     let ctx = pd.audio_context();
 
-    dsp_on().unwrap();
-
-    let patch_handle = open_patch("tests/patches/echo.pd").unwrap();
+    pd.open_patch("tests/patches/echo.pd").unwrap();
 
     let messages_to_fill = after_touch_messages_received.clone();
-    on_midi_after_touch(move |channel, value| {
+    pd.on_midi_after_touch(move |channel, value| {
         messages_to_fill.lock().unwrap().push((channel, value));
     });
+
+    pd.dsp_on().unwrap();
 
     let (tx, rx) = mpsc::channel::<()>();
 
@@ -61,7 +55,7 @@ fn send_and_receive_after_touch() {
     #[allow(clippy::explicit_counter_loop)]
     // Send 5 note on messages in sequence.
     for _ in 0..5 {
-        send_after_touch(channel, value).unwrap();
+        pd.send_after_touch(channel, value).unwrap();
         channel += 1;
         value += 1;
     }
@@ -86,5 +80,5 @@ fn send_and_receive_after_touch() {
             assert_eq!(p1, p2);
         });
 
-    close_patch(patch_handle).unwrap();
+    pd.close_patch().unwrap();
 }

@@ -39,6 +39,12 @@
     clippy::missing_trait_methods,
     clippy::mem_forget,
     clippy::pub_use,
+    clippy::single_call_fn,
+    clippy::arbitrary_source_item_ordering,
+    clippy::single_char_lifetime_names,
+    clippy::unwrap_in_result,
+    clippy::expect_used,
+    clippy::missing_panics_doc,
 
     // Expect is fine in relevant cases
     // clippy::expect_used,
@@ -488,13 +494,13 @@ doc = ::embed_doc_image::embed_image!("phasor_patch", "assets/phasor_patch.png")
 //! [BSD-3-Clause](https://opensource.org/licenses/BSD-3-Clause).
 //! See [LICENSE](https://raw.githubusercontent.com/alisomay/libpd-rs/main/LICENCE) file.
 
-/// This module exposes [`PdInstance`](crate::instance::PdInstance) struct which covers all the functionality related to pd instances.
+/// This module exposes [`PdInstance`] struct which covers all the functionality related to pd instances.
 ///
 /// Instances of pd are stored in a thread local way and there can be only one instance at a time could be active per thread.
 ///
 /// The active instance for the thread can be set by calling `set_as_current` method on the instance.
 ///
-/// [`PdInstance`](crate::instance::PdInstance) also has a `Drop` implementation which frees the resources of the instance when it goes out of scope.
+/// [`PdInstance`] also has a `Drop` implementation which frees the resources of the instance when it goes out of scope.
 pub mod instance;
 
 /// The functions module could be considered as the mid level layer of the library.
@@ -515,7 +521,7 @@ pub mod functions;
 /// Pd wraps primitive types such as a float or a string in a type called atom.
 /// This enables pd to have heterogenous lists.
 ///
-/// This module exposes the representation of that type as a Rust enum, [`Atom`](crate::types::Atom).
+/// This module exposes the representation of that type as a Rust enum, [`Atom`].
 ///
 /// It also exposes some others to hold file or receiver handles returned from libpd functions.
 pub mod types;
@@ -528,16 +534,28 @@ pub mod error;
 /// The atom module contains the Atom enum which is used to represent pd's atom type in Rust.
 pub mod atom;
 
-use error::PdError;
-use libpd_sys::_pdinstance;
-use std::collections::HashMap;
-use std::path::{Path, PathBuf};
-use std::{fs, ptr};
+use atom::make_atom_list_from_t_atom_list;
+use error::{PdError, RecieveError, SendError, SizeError, SubscriptionError, C_STR_FAILURE};
+use libffi::high::{
+    ClosureMut1, ClosureMut2, ClosureMut3, ClosureMut4, FnPtr1, FnPtr2, FnPtr3, FnPtr4,
+};
+use libpd_sys::{
+    _pdinstance, t_libpd_aftertouchhook, t_libpd_banghook, t_libpd_controlchangehook,
+    t_libpd_doublehook, t_libpd_floathook, t_libpd_listhook, t_libpd_messagehook,
+    t_libpd_midibytehook, t_libpd_noteonhook, t_libpd_pitchbendhook, t_libpd_polyaftertouchhook,
+    t_libpd_printhook, t_libpd_programchangehook, t_libpd_symbolhook,
+};
+use std::{
+    collections::HashMap,
+    ffi::CStr,
+    path::{Path, PathBuf},
+    {fs, os, ptr, slice},
+};
 use tempfile::NamedTempFile;
 
-use crate::instance::PdInstance;
 use crate::{
     error::PatchLifeCycleError,
+    instance::PdInstance,
     types::{PatchFileHandle, ReceiverHandle},
 };
 
@@ -553,14 +571,14 @@ pub use libpd_sys;
 ///
 /// **It is strongly advised to keep the very first instance alive through the lifetime of the application.**
 ///
-/// See [`PdInstance`](crate::instance::PdInstance) for more details about this topic.
+/// See [`PdInstance`] for more details about this topic.
 ///
 /// After created and registered internally the instance lives in libpd's memory.
 /// Dropping this struct will free the resources of the instance.
 ///
-/// It is also important to note that the mid-level layer of this library [`functions`](crate::functions) also can modify the state of this instance.
+/// It is also important to note that the mid-level layer of this library [`functions`] also can modify the state of this instance.
 ///
-/// To learn more about how instances are created and managed, please see the [`instance`](crate::instance) module level documentation.
+/// To learn more about how instances are created and managed, please see the [`instance`] module level documentation.
 ///
 /// This is why that if you're not very familiar with this library's and libpd's source code you shouldn't mix the high level layer with the mid level layer.
 ///
@@ -599,6 +617,9 @@ pub struct Pd {
     input_channels: i32,
     output_channels: i32,
     sample_rate: i32,
+    sent_message_info: Option<SentMessageInfo>,
+    /// A store to keep track of puredata callback functions to be dropped when the instance goes out of scope.
+    callbacks: Callbacks,
     running_patch: Option<PatchFileHandle>,
     temporary_evaluated_patch: Option<NamedTempFile>,
     /// A store to keep track of subscriptions which are made to senders in pd through the app lifecycle.
@@ -607,10 +628,29 @@ pub struct Pd {
     pub search_paths: Vec<PathBuf>,
 }
 
+type PrintHookCodePtr<'a> = *const FnPtr1<'a, *const i8, ()>;
+type BangHookCodePtr<'a> = *const FnPtr1<'a, *const i8, ()>;
+type FloatHookCodePtr<'a> = *const FnPtr2<'a, *const i8, f32, ()>;
+type DoubleHookCodePtr<'a> = *const FnPtr2<'a, *const i8, f64, ()>;
+type SymbolHookCodePtr<'a> = *const FnPtr2<'a, *const i8, *const i8, ()>;
+type ListHookCodePtr<'a> = *const FnPtr3<'a, *const i8, i32, *mut libpd_sys::_atom, ()>;
+type MessageHookCodePtr<'a> =
+    *const FnPtr4<'a, *const i8, *const i8, i32, *mut libpd_sys::_atom, ()>;
+
+type MidiNoteOnCodePtr<'a> = *const FnPtr3<'a, i32, i32, i32, ()>;
+type MidiControlChangeCodePtr<'a> = *const FnPtr3<'a, i32, i32, i32, ()>;
+type MidiProgramChangeCodePtr<'a> = *const FnPtr2<'a, i32, i32, ()>;
+type MidiPitchBendCodePtr<'a> = *const FnPtr2<'a, i32, i32, ()>;
+type MidiAfterTouchCodePtr<'a> = *const FnPtr2<'a, i32, i32, ()>;
+type MidiPolyAfterTouchCodePtr<'a> = *const FnPtr3<'a, i32, i32, i32, ()>;
+type MidiByteCodePtr<'a> = *const FnPtr2<'a, i32, i32, ()>;
+
+const GUARD_FROM_CALLBACK_DURING_DSP: bool = false;
+
 impl Pd {
     /// Initializes a pd instance.
     ///
-    /// It calls [`PdInstance::new`](crate::instance::PdInstance::new) and [`initialize_audio`](crate::initialize_audio) with the provided arguments and returns an instance where a user can keep simple state and call some convenience methods.
+    /// It calls [`PdInstance::new`](crate::instance::PdInstance::new) and [`initialize_audio`](crate::functions::initialize_audio) with the provided arguments and returns an instance where a user can keep simple state and call some convenience methods.
     ///
     /// This method will not set the newly created instance as the active instance for the thread.
     ///
@@ -648,6 +688,8 @@ impl Pd {
             input_channels,
             output_channels,
             sample_rate,
+            sent_message_info: None,
+            callbacks: Callbacks::new(),
             running_patch: None,
             temporary_evaluated_patch: None,
             subscriptions: HashMap::default(),
@@ -661,7 +703,7 @@ impl Pd {
     }
 
     /// Returns a mutable reference to the inner pd instance.
-    pub fn inner_mut(&mut self) -> &mut PdInstance {
+    pub const fn inner_mut(&mut self) -> &mut PdInstance {
         &mut self.inner
     }
 
@@ -765,7 +807,7 @@ impl Pd {
     /// # Errors
     ///
     /// A list of errors that can occur:
-    /// - [`PatchLifeCycleError`](crate::error::PatchLifeCycleError)
+    /// - [`PatchLifeCycleError`]
     ///   - [`FailedToClosePatch`](crate::error::PatchLifeCycleError::FailedToClosePatch)
     pub fn close_patch(&mut self) -> Result<(), PdError> {
         let _guard = self.set_as_active_instance();
@@ -795,7 +837,7 @@ impl Pd {
     /// # Errors
     ///
     /// A list of errors that can occur:
-    /// - [`PatchLifeCycleError`](crate::error::PatchLifeCycleError)
+    /// - [`PatchLifeCycleError`]
     ///   - [`FailedToClosePatch`](crate::error::PatchLifeCycleError::FailedToClosePatch)
     ///   - [`FailedToOpenPatch`](crate::error::PatchLifeCycleError::FailedToOpenPatch)
     ///   - [`PathDoesNotExist`](crate::error::PatchLifeCycleError::PathDoesNotExist)
@@ -839,7 +881,7 @@ impl Pd {
     /// # Errors
     ///
     /// A list of errors that can occur:
-    /// - [`PatchLifeCycleError`](crate::error::PatchLifeCycleError)
+    /// - [`PatchLifeCycleError`]
     ///   - [`FailedToEvaluateAsPatch`](crate::error::PatchLifeCycleError::FailedToEvaluateAsPatch)
     ///   - [`FailedToClosePatch`](crate::error::PatchLifeCycleError::FailedToClosePatch)
     ///   - [`FailedToOpenPatch`](crate::error::PatchLifeCycleError::FailedToOpenPatch)
@@ -881,7 +923,7 @@ impl Pd {
     /// # Errors
     ///
     /// A list of errors that can occur:
-    /// - [`SubscriptionError`](crate::error::SubscriptionError)
+    /// - [`SubscriptionError`]
     ///   - [`FailedToSubscribeToSender`](crate::error::SubscriptionError::FailedToSubscribeToSender)
     pub fn subscribe_to<T: AsRef<str>>(&mut self, source: T) -> Result<(), PdError> {
         let _guard = self.set_as_active_instance();
@@ -911,7 +953,7 @@ impl Pd {
     /// # Errors
     ///
     /// A list of errors that can occur:
-    /// - [`SubscriptionError`](crate::error::SubscriptionError)
+    /// - [`SubscriptionError`]
     ///   - [`FailedToSubscribeToSender`](crate::error::SubscriptionError::FailedToSubscribeToSender)
     pub fn subscribe_to_many<T: AsRef<str>>(&mut self, sources: &[T]) -> Result<(), PdError> {
         let _guard = self.set_as_active_instance();
@@ -995,7 +1037,7 @@ impl Pd {
     /// # Errors
     ///
     /// A list of errors that can occur:
-    /// - [`PatchLifeCycleError`](crate::error::PatchLifeCycleError)
+    /// - [`PatchLifeCycleError`]
     ///   - [`PatchIsNotOpen`](crate::error::PatchLifeCycleError::PatchIsNotOpen)
     pub fn dollar_zero(&mut self) -> Result<i32, PdError> {
         let _guard = self.set_as_active_instance();
@@ -1022,21 +1064,55 @@ impl Pd {
     /// # Errors
     ///
     /// A list of errors that can occur:
-    /// - [`SendError`](crate::error::SendError)
+    /// - [`SendError`]
     ///   - [`MissingDestination`](crate::error::SendError::MissingDestination)
-    /// - [`SizeError`](crate::error::SizeError)
+    /// - [`SizeError`]
     ///   - [`TooLarge`](crate::error::SizeError::TooLarge)
     pub fn activate_audio(&mut self, on: bool) -> Result<(), PdError> {
-        let _guard = self.set_as_active_instance();
-        if on && !self.audio_active {
-            functions::util::dsp_on()?;
-            self.audio_active = true;
-        } else if !on && self.audio_active {
-            functions::util::dsp_off()?;
-            self.audio_active = false;
+        if on {
+            self.dsp_on()
         } else {
+            self.dsp_off()
+        }
+    }
+
+    /// Activates audio in pd.
+    ///
+    /// # Errors
+    ///
+    /// A list of errors that can occur:
+    /// - [`SendError`]
+    ///   - [`MissingDestination`](crate::error::SendError::MissingDestination)
+    /// - [`SizeError`]
+    ///   - [`TooLarge`](crate::error::SizeError::TooLarge)
+    pub fn dsp_on(&mut self) -> Result<(), PdError> {
+        if self.audio_active {
             return Ok(());
         }
+
+        let _guard = self.set_as_active_instance();
+        functions::util::dsp_on()?;
+        self.audio_active = true;
+        Ok(())
+    }
+
+    /// Deactivates audio in pd.
+    ///
+    /// # Errors
+    ///
+    /// A list of errors that can occur:
+    /// - [`SendError`]
+    ///   - [`MissingDestination`](crate::error::SendError::MissingDestination)
+    /// - [`SizeError`]
+    ///   - [`TooLarge`](crate::error::SizeError::TooLarge)
+    pub fn dsp_off(&mut self) -> Result<(), PdError> {
+        if !self.audio_active {
+            return Ok(());
+        }
+
+        let _guard = self.set_as_active_instance();
+        functions::util::dsp_off()?;
+        self.audio_active = false;
         Ok(())
     }
 
@@ -1075,9 +1151,663 @@ impl Pd {
     pub const fn output_channels(&self) -> i32 {
         self.output_channels
     }
+
+    /// Calls [`send_bang_to`](crate::functions::send::send_bang_to) for this instance.
+    ///
+    /// # Errors
+    /// - See [`send_bang_to`](crate::functions::send::send_bang_to).
+    pub fn send_bang_to<T: AsRef<str>>(&self, receiver: T) -> Result<(), SendError> {
+        let _guard = self.set_as_active_instance();
+        functions::send::send_bang_to(receiver)
+    }
+
+    /// Calls [`send_float_to`](crate::functions::send::send_float_to) for this instance.
+    ///
+    /// # Errors
+    /// - See [`send_float_to`](crate::functions::send::send_float_to).
+    pub fn send_float_to<T: AsRef<str>>(&self, receiver: T, value: f32) -> Result<(), SendError> {
+        let _guard = self.set_as_active_instance();
+        functions::send::send_float_to(receiver, value)
+    }
+
+    /// Calls [`send_double_to`](crate::functions::send::send_double_to) for this instance.
+    ///
+    /// # Errors
+    /// - See [`send_double_to`](crate::functions::send::send_double_to).
+    pub fn send_double_to<T: AsRef<str>>(&self, receiver: T, value: f64) -> Result<(), SendError> {
+        let _guard = self.set_as_active_instance();
+        functions::send::send_double_to(receiver, value)
+    }
+
+    /// Calls [`send_symbol_to`](crate::functions::send::send_symbol_to) for this instance.
+    ///
+    /// # Errors
+    /// - See [`send_symbol_to`](crate::functions::send::send_symbol_to).
+    pub fn send_symbol_to<T: AsRef<str>, S: AsRef<str>>(
+        &self,
+        receiver: T,
+        value: S,
+    ) -> Result<(), SendError> {
+        let _guard = self.set_as_active_instance();
+        functions::send::send_symbol_to(receiver, value)
+    }
+
+    /// Calls [`start_message`](crate::functions::send::start_message) for this instance.
+    /// Will panic if length is negative.
+    ///
+    /// # Errors
+    /// - See [`start_message`](crate::functions::send::start_message).
+    pub fn start_message(&mut self, length: i32) -> Result<(), PdError> {
+        if self.sent_message_info.is_some() {
+            return Err(SendError::MessageAlreadyStarted.into());
+        }
+
+        let _guard = self.set_as_active_instance();
+        functions::send::start_message(length)?;
+
+        self.sent_message_info = Some(SentMessageInfo::new(length)?);
+        Ok(())
+    }
+
+    /// Calls [`add_float_to_started_message`](crate::functions::send::add_float_to_started_message) for this instance.
+    ///
+    /// # Errors
+    ///
+    /// A list of errors that can occur in addition to [`add_float_to_started_message`](crate::functions::send::add_float_to_started_message):
+    /// - [`SendError`]
+    ///    - [`MessageNotStarted`](crate::error::SendError::MessageNotStarted) if [`Self::start_message`] was never called.
+    ///    - [`OutOfRange`](crate::error::SendError::OutOfRange) if the number of elements added to the started message is above its capacity.
+    pub fn add_float_to_started_message(&mut self, value: f32) -> Result<(), SendError> {
+        self.sent_message_info
+            .as_mut()
+            .ok_or(SendError::MessageNotStarted)?
+            .increment()?;
+
+        let _guard = self.set_as_active_instance();
+
+        functions::send::add_float_to_started_message(value);
+
+        Ok(())
+    }
+
+    /// Calls [`add_double_to_started_message`](crate::functions::send::add_double_to_started_message) for this instance.
+    ///
+    /// # Errors
+    ///
+    /// A list of errors that can occur in addition to [`add_double_to_started_message`](crate::functions::send::add_double_to_started_message):
+    /// - [`SendError`]
+    ///    - [`MessageNotStarted`](crate::error::SendError::MessageNotStarted) if [`Self::start_message`] was never called.
+    ///    - [`OutOfRange`](crate::error::SendError::OutOfRange) if the number of elements added to the started message is above its capacity.
+    pub fn add_double_to_started_message(&mut self, value: f64) -> Result<(), SendError> {
+        self.sent_message_info
+            .as_mut()
+            .ok_or(SendError::MessageNotStarted)?
+            .increment()?;
+
+        let _guard = self.set_as_active_instance();
+
+        functions::send::add_double_to_started_message(value);
+
+        Ok(())
+    }
+
+    /// Calls [`add_symbol_to_started_message`](crate::functions::send::add_symbol_to_started_message) for this instance.
+    ///
+    /// # Errors
+    ///
+    /// A list of errors that can occur in addition to [`add_symbol_to_started_message`](crate::functions::send::add_symbol_to_started_message):
+    /// - [`SendError`]
+    ///    - [`MessageNotStarted`](crate::error::SendError::MessageNotStarted) if [`Self::start_message`] was never called.
+    ///    - [`OutOfRange`](crate::error::SendError::OutOfRange) if the number of elements added to the started message is above its capacity.
+    pub fn add_symbol_to_started_message<T: AsRef<str>>(
+        &mut self,
+        value: T,
+    ) -> Result<(), SendError> {
+        self.sent_message_info
+            .as_mut()
+            .ok_or(SendError::MessageNotStarted)?
+            .increment()?;
+
+        let _guard = self.set_as_active_instance();
+
+        functions::send::add_symbol_to_started_message(value)
+    }
+
+    /// Calls [`finish_message_as_list_and_send_to`](crate::functions::send::finish_message_as_list_and_send_to) for this instance.
+    ///
+    /// # Errors
+    ///
+    /// A list of errors that can occur in addition to [`finish_message_as_list_and_send_to`](crate::functions::send::finish_message_as_list_and_send_to):
+    /// - [`SendError`]
+    ///    - [`MessageNotStarted`](crate::error::SendError::MessageNotStarted) if [`Self::start_message`] was never called.
+    pub fn finish_message_as_list_and_send_to<T: AsRef<str>>(
+        &mut self,
+        receiver: T,
+    ) -> Result<(), SendError> {
+        // Ensure that the message was actually started before sending.
+        self.sent_message_info
+            .take()
+            .ok_or(SendError::MessageNotStarted)?;
+
+        let _guard = self.set_as_active_instance();
+        functions::send::finish_message_as_list_and_send_to(receiver)
+    }
+
+    /// Calls [`finish_message_as_typed_message_and_send_to`](crate::functions::send::finish_message_as_typed_message_and_send_to) for this instance.
+    ///
+    /// # Errors
+    ///
+    /// A list of errors that can occur in addition to [`finish_message_as_typed_message_and_send_to`](crate::functions::send::finish_message_as_typed_message_and_send_to):
+    /// - [`SendError`]
+    ///    - [`MessageNotStarted`](crate::error::SendError::MessageNotStarted) if [`Self::start_message`] was never called.
+    ///    - [`OutOfRange`](crate::error::SendError::OutOfRange) If more than four items are sent. Messages above four elements cannot be typed.
+    pub fn finish_message_as_typed_message_and_send_to<T: AsRef<str>, S: AsRef<str>>(
+        &mut self,
+        receiver: T,
+        message_header: S,
+    ) -> Result<(), SendError> {
+        if self
+            .sent_message_info
+            .take()
+            .ok_or(SendError::MessageNotStarted)?
+            .length
+            > 4
+        {
+            return Err(SendError::OutOfRange);
+        }
+
+        let _guard = self.set_as_active_instance();
+        functions::send::finish_message_as_typed_message_and_send_to(receiver, message_header)
+    }
+
+    /// Calls [`send_list_to`](crate::functions::send::send_list_to) for this instance.
+    ///
+    /// # Errors
+    /// - See [`send_list_to`](crate::functions::send::send_list_to).
+    pub fn send_list_to<T: AsRef<str>>(&self, receiver: T, list: &[Atom]) -> Result<(), PdError> {
+        let _guard = self.set_as_active_instance();
+        functions::send::send_list_to(receiver, list)
+    }
+
+    /// Calls [`send_message_to`](crate::functions::send::send_message_to) for this instance.
+    ///
+    /// # Errors
+    /// - See [`send_message_to`](crate::functions::send::send_message_to).
+    pub fn send_message_to<T: AsRef<str>>(
+        &self,
+        receiver: T,
+        message: T,
+        list: &[Atom],
+    ) -> Result<(), PdError> {
+        let _guard = self.set_as_active_instance();
+        functions::send::send_message_to(receiver, message, list)
+    }
+
+    /// Calls [`send_note_on`](crate::functions::send::send_note_on) for this instance.
+    ///
+    /// # Errors
+    /// - See [`send_note_on`](crate::functions::send::send_note_on).
+    pub fn send_note_on(&self, channel: i32, pitch: i32, velocity: i32) -> Result<(), SendError> {
+        let _guard = self.set_as_active_instance();
+        functions::send::send_note_on(channel, pitch, velocity)
+    }
+
+    /// Calls [`send_control_change`](crate::functions::send::send_control_change) for this instance.
+    ///
+    /// # Errors
+    /// - See [`send_control_change`](crate::functions::send::send_control_change).
+    pub fn send_control_change(
+        &self,
+        channel: i32,
+        controller: i32,
+        value: i32,
+    ) -> Result<(), SendError> {
+        let _guard = self.set_as_active_instance();
+        functions::send::send_control_change(channel, controller, value)
+    }
+
+    /// Calls [`send_program_change`](crate::functions::send::send_program_change) for this instance.
+    ///
+    /// # Errors
+    /// - See [`send_program_change`](crate::functions::send::send_program_change).
+    pub fn send_program_change(&self, channel: i32, value: i32) -> Result<(), SendError> {
+        let _guard = self.set_as_active_instance();
+        functions::send::send_program_change(channel, value)
+    }
+
+    /// Calls [`send_pitch_bend`](crate::functions::send::send_pitch_bend) for this instance.
+    ///
+    /// # Errors
+    /// - See [`send_pitch_bend`](crate::functions::send::send_pitch_bend).
+    pub fn send_pitch_bend(&self, channel: i32, value: i32) -> Result<(), SendError> {
+        let _guard = self.set_as_active_instance();
+        functions::send::send_pitch_bend(channel, value)
+    }
+
+    /// Calls [`send_after_touch`](crate::functions::send::send_after_touch) for this instance.
+    ///
+    /// # Errors
+    /// - See [`send_after_touch`](crate::functions::send::send_after_touch).
+    pub fn send_after_touch(&self, channel: i32, value: i32) -> Result<(), SendError> {
+        let _guard = self.set_as_active_instance();
+        functions::send::send_after_touch(channel, value)
+    }
+
+    /// Calls [`send_poly_after_touch`](crate::functions::send::send_poly_after_touch) for this instance.
+    ///
+    /// # Errors
+    /// - See [`send_poly_after_touch`](crate::functions::send::send_poly_after_touch).
+    pub fn send_poly_after_touch(
+        &self,
+        channel: i32,
+        pitch: i32,
+        value: i32,
+    ) -> Result<(), SendError> {
+        let _guard = self.set_as_active_instance();
+        functions::send::send_poly_after_touch(channel, pitch, value)
+    }
+
+    /// Calls [`send_midi_byte`](crate::functions::send::send_midi_byte) for this instance.
+    ///
+    /// # Errors
+    /// - See [`send_midi_byte`](crate::functions::send::send_midi_byte).
+    pub fn send_midi_byte(&self, port: i32, byte: i32) -> Result<(), SendError> {
+        let _guard = self.set_as_active_instance();
+        functions::send::send_midi_byte(port, byte)
+    }
+
+    /// Calls [`send_sysex`](crate::functions::send::send_sysex) for this instance.
+    ///
+    /// # Errors
+    /// - See [`send_sysex`](crate::functions::send::send_sysex).
+    pub fn send_sysex(&self, port: i32, byte: i32) -> Result<(), SendError> {
+        let _guard = self.set_as_active_instance();
+        functions::send::send_sysex(port, byte)
+    }
+
+    /// Calls [`send_sys_realtime`](crate::functions::send::send_sys_realtime) for this instance.
+    ///
+    /// # Errors
+    /// - See [`send_sys_realtime`](crate::functions::send::send_sys_realtime).
+    pub fn send_sys_realtime(&self, port: i32, byte: i32) -> Result<(), SendError> {
+        let _guard = self.set_as_active_instance();
+        functions::send::send_sys_realtime(port, byte)
+    }
+
+    /// Calls [`start_listening_from`](crate::functions::receive::start_listening_from) for this instance.
+    ///
+    /// # Errors
+    /// - See [`start_listening_from`](crate::functions::receive::start_listening_from).
+    pub fn start_listening_from<T: AsRef<str>>(
+        &self,
+        sender: T,
+    ) -> Result<ReceiverHandle, SubscriptionError> {
+        let _guard = self.set_as_active_instance();
+        functions::receive::start_listening_from(sender)
+    }
+
+    /// Calls [`stop_listening_from`](crate::functions::receive::stop_listening_from) for this instance.
+    pub fn stop_listening_from(&self, source: ReceiverHandle) {
+        let _guard = self.set_as_active_instance();
+        functions::receive::stop_listening_from(source);
+    }
+
+    /// Calls [`source_to_listen_from_exists`](crate::functions::receive::source_to_listen_from_exists) for this instance.
+    ///
+    /// # Errors
+    /// - See [`source_to_listen_from_exists`](crate::functions::receive::source_to_listen_from_exists).
+    pub fn source_to_listen_from_exists<T: AsRef<str>>(
+        &self,
+        sender: T,
+    ) -> Result<bool, SubscriptionError> {
+        let _guard = self.set_as_active_instance();
+        functions::receive::source_to_listen_from_exists(sender)
+    }
+
+    /// Instance-safe version of [`on_print`](crate::functions::receive::on_print) which doesn't leak memory.
+    ///
+    /// # Errors
+    /// - [`RecieveError`]
+    ///    - [`DspActive`](crate::error::RecieveError::DspActive)
+    pub fn on_print<'a, F: FnMut(&str) + 'a>(
+        &'a mut self,
+        mut callback: F,
+    ) -> Result<(), RecieveError> {
+        if GUARD_FROM_CALLBACK_DURING_DSP && self.audio_active {
+            return Err(RecieveError::DspActive);
+        }
+
+        let _guard = self.set_as_active_instance();
+
+        let callback = self.callbacks.add_callback(
+            move |out: *const os::raw::c_char| {
+                callback(str_from_ptr(out));
+            },
+            ClosureMut1::new,
+        );
+
+        let code = callback.code_ptr() as PrintHookCodePtr<'a>;
+        let ptr = unsafe { *code.cast::<t_libpd_printhook>() };
+
+        unsafe {
+            libpd_sys::libpd_set_queued_printhook(Some(libpd_sys::libpd_print_concatenator));
+        };
+
+        // Always concatenate
+        unsafe {
+            libpd_sys::libpd_set_concatenated_printhook(ptr);
+        }
+
+        Ok(())
+    }
+
+    /// Instance-safe version of [`on_bang`](crate::functions::receive::on_bang) which doesn't leak memory.
+    ///
+    /// # Errors
+    /// - [`RecieveError`]
+    ///    - [`DspActive`](crate::error::RecieveError::DspActive)
+    pub fn on_bang<'a, F: FnMut(&str) + 'a>(
+        &'a mut self,
+        mut callback: F,
+    ) -> Result<(), RecieveError> {
+        if GUARD_FROM_CALLBACK_DURING_DSP && self.audio_active {
+            return Err(RecieveError::DspActive);
+        }
+
+        let _guard = self.set_as_active_instance();
+
+        let callback = self.callbacks.add_callback(
+            move |source: *const os::raw::c_char| {
+                let source = unsafe { CStr::from_ptr(source).to_str().expect(C_STR_FAILURE) };
+                callback(source);
+            },
+            ClosureMut1::new,
+        );
+
+        let code = callback.code_ptr() as BangHookCodePtr<'a>;
+        let ptr = unsafe { *code.cast::<t_libpd_banghook>() };
+
+        unsafe {
+            libpd_sys::libpd_set_queued_banghook(ptr);
+        }
+
+        Ok(())
+    }
+
+    /// Instance-safe version of [`on_float`](crate::functions::receive::on_float) which doesn't leak memory.
+    ///
+    /// # Errors
+    /// - [`RecieveError`]
+    ///    - [`DspActive`](crate::error::RecieveError::DspActive)
+    pub fn on_float<'a, F: FnMut(&str, f32) + 'a>(
+        &'a mut self,
+        mut callback: F,
+    ) -> Result<(), RecieveError> {
+        if GUARD_FROM_CALLBACK_DURING_DSP && self.audio_active {
+            return Err(RecieveError::DspActive);
+        }
+
+        let _guard = self.set_as_active_instance();
+
+        let callback = self.callbacks.add_callback(
+            move |source: *const os::raw::c_char, float: f32| {
+                let source = unsafe { CStr::from_ptr(source).to_str().expect(C_STR_FAILURE) };
+                callback(source, float);
+            },
+            ClosureMut2::new,
+        );
+
+        let code = callback.code_ptr() as FloatHookCodePtr<'a>;
+        let ptr = unsafe { *code.cast::<t_libpd_floathook>() };
+
+        unsafe {
+            libpd_sys::libpd_set_queued_floathook(ptr);
+        }
+
+        Ok(())
+    }
+
+    /// Instance-safe version of [`on_double`](crate::functions::receive::on_double) which doesn't leak memory.
+    ///
+    /// # Errors
+    /// - [`RecieveError`]
+    ///    - [`DspActive`](crate::error::RecieveError::DspActive)
+    pub fn on_double<'a, F: FnMut(&str, f64) + 'a>(
+        &'a mut self,
+        mut callback: F,
+    ) -> Result<(), RecieveError> {
+        if GUARD_FROM_CALLBACK_DURING_DSP && self.audio_active {
+            return Err(RecieveError::DspActive);
+        }
+
+        let _guard = self.set_as_active_instance();
+
+        let callback = self.callbacks.add_callback(
+            move |source: *const os::raw::c_char, double: f64| {
+                callback(str_from_ptr(source), double);
+            },
+            ClosureMut2::new,
+        );
+
+        let code = callback.code_ptr() as DoubleHookCodePtr<'a>;
+        let ptr = unsafe { *code.cast::<t_libpd_doublehook>() };
+
+        unsafe {
+            libpd_sys::libpd_set_queued_doublehook(ptr);
+        }
+
+        Ok(())
+    }
+
+    /// Instance-safe version of [`on_symbol`](crate::functions::receive::on_symbol) which doesn't leak memory.
+    ///
+    /// # Errors
+    /// - [`RecieveError`]
+    ///    - [`DspActive`](crate::error::RecieveError::DspActive)
+    pub fn on_symbol<'a, F: FnMut(&str, &str) + 'a>(
+        &'a mut self,
+        mut callback: F,
+    ) -> Result<(), RecieveError> {
+        if GUARD_FROM_CALLBACK_DURING_DSP && self.audio_active {
+            return Err(RecieveError::DspActive);
+        }
+
+        let _guard = self.set_as_active_instance();
+
+        let callback = self.callbacks.add_callback(
+            move |source: *const os::raw::c_char, symbol: *const os::raw::c_char| {
+                callback(str_from_ptr(source), str_from_ptr(symbol));
+            },
+            ClosureMut2::new,
+        );
+
+        let code = callback.code_ptr() as SymbolHookCodePtr<'a>;
+        let ptr = unsafe { *code.cast::<t_libpd_symbolhook>() };
+
+        unsafe {
+            libpd_sys::libpd_set_queued_symbolhook(ptr);
+        }
+
+        Ok(())
+    }
+
+    /// Instance-safe version of [`on_list`](crate::functions::receive::on_list) which doesn't leak memory.
+    ///
+    /// # Errors
+    /// - [`RecieveError`]
+    ///    - [`DspActive`](crate::error::RecieveError::DspActive)
+    pub fn on_list<'a, F: FnMut(&str, &[Atom]) + 'a>(
+        &'a mut self,
+        mut callback: F,
+    ) -> Result<(), RecieveError> {
+        if GUARD_FROM_CALLBACK_DURING_DSP && self.audio_active {
+            return Err(RecieveError::DspActive);
+        }
+
+        let _guard = self.set_as_active_instance();
+
+        let callback = self.callbacks.add_callback(
+            move |source: *const os::raw::c_char,
+                  list_length: i32,
+                  atom_list: *mut libpd_sys::t_atom| {
+                callback(
+                    str_from_ptr(source),
+                    &atoms_from_raw(list_length, atom_list),
+                );
+            },
+            ClosureMut3::new,
+        );
+
+        let code = callback.code_ptr() as ListHookCodePtr<'a>;
+        let ptr = unsafe { *code.cast::<t_libpd_listhook>() };
+
+        unsafe {
+            libpd_sys::libpd_set_queued_listhook(ptr);
+        }
+
+        Ok(())
+    }
+
+    /// Instance-safe version of [`on_message`](crate::functions::receive::on_message) which doesn't leak memory.
+    ///
+    /// # Errors
+    /// - [`RecieveError`]
+    ///    - [`DspActive`](crate::error::RecieveError::DspActive)
+    pub fn on_message<'a, F: FnMut(&str, &str, &[Atom]) + 'a>(
+        &'a mut self,
+        mut callback: F,
+    ) -> Result<(), RecieveError> {
+        if GUARD_FROM_CALLBACK_DURING_DSP && self.audio_active {
+            return Err(RecieveError::DspActive);
+        }
+
+        let _guard = self.set_as_active_instance();
+
+        let callback = self.callbacks.add_callback(
+            move |source: *const os::raw::c_char,
+                  message: *const os::raw::c_char,
+                  list_length: i32,
+                  atom_list: *mut libpd_sys::t_atom| {
+                callback(
+                    str_from_ptr(source),
+                    str_from_ptr(message),
+                    &atoms_from_raw(list_length, atom_list),
+                );
+            },
+            ClosureMut4::new,
+        );
+
+        let code = callback.code_ptr() as MessageHookCodePtr<'a>;
+        let ptr = unsafe { *code.cast::<t_libpd_messagehook>() };
+
+        unsafe {
+            libpd_sys::libpd_set_queued_messagehook(ptr);
+        }
+
+        Ok(())
+    }
+
+    /// Instance-safe version of [`on_midi_note_on`](crate::functions::receive::on_midi_note_on) which doesn't leak memory.
+    pub fn on_midi_note_on<'a, F: FnMut(i32, i32, i32) + 'a>(&'a mut self, callback: F) {
+        let _guard = self.set_as_active_instance();
+
+        let callback = self.callbacks.add_callback(callback, ClosureMut3::new);
+
+        let code = callback.code_ptr() as MidiNoteOnCodePtr<'a>;
+        let ptr = unsafe { *code.cast::<t_libpd_noteonhook>() };
+
+        unsafe {
+            libpd_sys::libpd_set_queued_noteonhook(ptr);
+        }
+    }
+
+    /// Instance-safe version of [`on_midi_control_change`](crate::functions::receive::on_midi_control_change) which doesn't leak memory.
+    pub fn on_midi_control_change<'a, F: FnMut(i32, i32, i32) + 'a>(&'a mut self, callback: F) {
+        let _guard = self.set_as_active_instance();
+
+        let callback = self.callbacks.add_callback(callback, ClosureMut3::new);
+
+        let code = callback.code_ptr() as MidiControlChangeCodePtr<'a>;
+        let ptr = unsafe { *code.cast::<t_libpd_controlchangehook>() };
+
+        unsafe {
+            libpd_sys::libpd_set_queued_controlchangehook(ptr);
+        }
+    }
+
+    /// Instance-safe version of [`on_midi_program_change`](crate::functions::receive::on_midi_program_change) which doesn't leak memory.
+    pub fn on_midi_program_change<'a, F: FnMut(i32, i32) + 'a>(&'a mut self, callback: F) {
+        let _guard = self.set_as_active_instance();
+
+        let callback = self.callbacks.add_callback(callback, ClosureMut2::new);
+
+        let code = callback.code_ptr() as MidiProgramChangeCodePtr<'a>;
+        let ptr = unsafe { *code.cast::<t_libpd_programchangehook>() };
+
+        unsafe {
+            libpd_sys::libpd_set_queued_programchangehook(ptr);
+        }
+    }
+
+    /// Instance-safe version of [`on_midi_pitch_bend`](crate::functions::receive::on_midi_pitch_bend) which doesn't leak memory.
+    pub fn on_midi_pitch_bend<'a, F: FnMut(i32, i32) + 'a>(&'a mut self, callback: F) {
+        let _guard = self.set_as_active_instance();
+
+        let callback = self.callbacks.add_callback(callback, ClosureMut2::new);
+
+        let code = callback.code_ptr() as MidiPitchBendCodePtr<'a>;
+        let ptr = unsafe { *code.cast::<t_libpd_pitchbendhook>() };
+
+        unsafe {
+            libpd_sys::libpd_set_queued_pitchbendhook(ptr);
+        }
+    }
+
+    /// Instance-safe version of [`on_midi_after_touch`](crate::functions::receive::on_midi_after_touch) which doesn't leak memory.
+    pub fn on_midi_after_touch<'a, F: FnMut(i32, i32) + 'a>(&'a mut self, callback: F) {
+        let _guard = self.set_as_active_instance();
+
+        let callback = self.callbacks.add_callback(callback, ClosureMut2::new);
+
+        let code = callback.code_ptr() as MidiAfterTouchCodePtr<'a>;
+        let ptr = unsafe { *code.cast::<t_libpd_aftertouchhook>() };
+
+        unsafe {
+            libpd_sys::libpd_set_queued_aftertouchhook(ptr);
+        }
+    }
+
+    /// Instance-safe version of [`on_midi_poly_after_touch`](crate::functions::receive::on_midi_poly_after_touch) which doesn't leak memory.
+    pub fn on_midi_poly_after_touch<'a, F: FnMut(i32, i32, i32) + 'a>(&'a mut self, callback: F) {
+        let _guard = self.set_as_active_instance();
+
+        let callback = self.callbacks.add_callback(callback, ClosureMut3::new);
+
+        //let callback = ClosureMut3::new(closure);
+        let code = callback.code_ptr() as MidiPolyAfterTouchCodePtr<'a>;
+        let ptr = unsafe { *code.cast::<t_libpd_polyaftertouchhook>() };
+
+        unsafe {
+            libpd_sys::libpd_set_queued_polyaftertouchhook(ptr);
+        }
+    }
+
+    /// Instance-safe version of [`on_midi_poly_after_touch`](crate::functions::receive::on_midi_poly_after_touch) which doesn't leak memory.
+    pub fn on_midi_byte<'a, F: FnMut(i32, i32) + 'a>(&'a mut self, callback: F) {
+        let _guard = self.set_as_active_instance();
+
+        let callback = self.callbacks.add_callback(callback, ClosureMut2::new);
+
+        let code = callback.code_ptr() as MidiByteCodePtr<'a>;
+        let ptr = unsafe { *code.cast::<t_libpd_midibytehook>() };
+
+        unsafe {
+            libpd_sys::libpd_set_queued_midibytehook(ptr);
+        }
+    }
 }
 
-/// This struct encapsulates a clone of the [`PdInstance`](crate::instance::PdInstance) to be used in the audio thread.
+/// This struct encapsulates a clone of the [`PdInstance`] to be used in the audio thread.
 ///
 /// Since the instances are thread local, this is just a convenience struct to ensure that the instance is set as the current one before calling any functions.
 ///
@@ -1163,5 +1893,106 @@ impl Drop for ActiveInstanceGuard {
         unsafe {
             libpd_sys::libpd_set_instance(self.previous_instance);
         }
+    }
+}
+
+// Tracking for ensuring that resources created to handle the callbacks are cleaned up when `Pd` is dropped.
+struct Callbacks {
+    callbacks: Vec<CallbackDtor>,
+}
+
+impl Callbacks {
+    const fn new() -> Self {
+        Self {
+            callbacks: Vec::new(),
+        }
+    }
+
+    fn add_callback<'a, A: 'a, B, F: Fn(&'a mut A) -> B + 'a>(
+        &mut self,
+        callback: A,
+        closure_mut_fn: F,
+    ) -> &'a mut B {
+        let boxed = Box::new(callback);
+        let raw = Box::into_raw(boxed);
+        let drop = CallbackDtor::drop_inner::<A>;
+
+        self.callbacks.push(CallbackDtor {
+            drop,
+            data: raw.cast(),
+        });
+
+        let callback = unsafe { raw.as_mut().expect("callback is nullptr") };
+
+        let closure = Box::new(closure_mut_fn(callback));
+        let raw = Box::into_raw(closure);
+        let drop = CallbackDtor::drop_inner::<B>;
+
+        self.callbacks.push(CallbackDtor {
+            drop,
+            data: raw.cast(),
+        });
+
+        unsafe { raw.as_mut().expect("callback is nullptr") }
+    }
+}
+
+// The smallest amount of information required to clean up an arbitrary Box
+struct CallbackDtor {
+    drop: unsafe fn(*mut ()),
+    data: *mut (),
+}
+
+impl Drop for CallbackDtor {
+    fn drop(&mut self) {
+        unsafe { (self.drop)(self.data) }
+    }
+}
+
+impl CallbackDtor {
+    fn drop_inner<T>(p: *mut ()) {
+        unsafe { drop(Box::<T>::from_raw(p.cast())) }
+    }
+}
+
+fn atoms_from_raw(list_length: i32, atom_list: *mut libpd_sys::t_atom) -> Vec<Atom> {
+    #[expect(
+        clippy::cast_sign_loss,
+        reason = "We're trusting Pd to not send a negative list length. I think this is sane enough."
+    )]
+    let atom_list = unsafe { slice::from_raw_parts(atom_list, list_length as usize) };
+    make_atom_list_from_t_atom_list(atom_list)
+}
+
+fn str_from_ptr<'a>(s: *const i8) -> &'a str {
+    unsafe { CStr::from_ptr(s).to_str().expect(C_STR_FAILURE) }
+}
+
+/// Type to assist with checking for the validity of sending a message.
+struct SentMessageInfo {
+    capacity: i32,
+    length: i32,
+}
+
+impl SentMessageInfo {
+    const fn increment(&mut self) -> Result<(), SendError> {
+        self.length += 1;
+
+        if self.length > self.capacity {
+            Err(SendError::OutOfRange)
+        } else {
+            Ok(())
+        }
+    }
+
+    const fn new(capacity: i32) -> Result<Self, SizeError> {
+        if capacity < 0 {
+            return Err(SizeError::TooLarge);
+        }
+
+        Ok(Self {
+            capacity,
+            length: 0,
+        })
     }
 }

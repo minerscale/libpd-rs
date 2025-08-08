@@ -2,14 +2,7 @@
 
 use std::any::type_name;
 
-use libpd_rs::functions::{
-    block_size, close_patch, init, initialize_audio, open_patch,
-    process::{
-        process_double, process_float, process_raw, process_raw_double, process_raw_short,
-        process_short,
-    },
-    util::dsp_on,
-};
+use libpd_rs::{functions::block_size, Pd};
 
 fn type_of<T>(_: T) -> &'static str {
     type_name::<T>()
@@ -20,11 +13,13 @@ fn all_process_functions() {
     let sample_rate = 44100;
     let output_channels = 2;
 
-    init().unwrap();
-    initialize_audio(0, output_channels, sample_rate).unwrap();
-    dsp_on().unwrap();
+    let mut pd = Pd::init_and_configure(0, output_channels, sample_rate).unwrap();
 
-    let patch_handle = open_patch("tests/patches/sine.pd").unwrap();
+    pd.dsp_on().unwrap();
+
+    pd.open_patch("tests/patches/sine.pd").unwrap();
+
+    let ctx = pd.audio_context();
 
     // Float
     let input_buffer = [0.0f32; 512];
@@ -32,7 +27,7 @@ fn all_process_functions() {
 
     for _ in 0..(44100 / block_size() * output_channels) {
         let ticks = output_buffer.len() as i32 / (block_size() * output_channels);
-        process_float(ticks, &input_buffer, &mut output_buffer);
+        ctx.process_float(ticks, &input_buffer, &mut output_buffer);
     }
 
     let sum = output_buffer.iter().fold(0_f32, |mut acc, element| {
@@ -49,7 +44,7 @@ fn all_process_functions() {
 
     for _ in 0..(44100 / block_size() * output_channels) {
         let ticks = output_buffer.len() as i32 / (block_size() * output_channels);
-        process_double(ticks, &input_buffer, &mut output_buffer);
+        ctx.process_double(ticks, &input_buffer, &mut output_buffer);
     }
 
     let sum = output_buffer.iter().fold(0_f64, |mut acc, element| {
@@ -66,7 +61,7 @@ fn all_process_functions() {
 
     for _ in 0..(44100 / block_size() * output_channels) {
         let ticks = output_buffer.len() as i32 / (block_size() * output_channels);
-        process_short(ticks, &input_buffer, &mut output_buffer);
+        ctx.process_short(ticks, &input_buffer, &mut output_buffer);
     }
 
     let sum = output_buffer.iter().fold(0_i32, |mut acc, element| {
@@ -82,7 +77,7 @@ fn all_process_functions() {
     let mut output_buffer = [0.0f32; 1024];
 
     for _ in 0..(44100 / block_size() * output_channels) {
-        process_raw(&input_buffer, &mut output_buffer);
+        ctx.process_raw(&input_buffer, &mut output_buffer);
     }
 
     let sum = output_buffer.iter().fold(0_f32, |mut acc, element| {
@@ -98,7 +93,7 @@ fn all_process_functions() {
     let mut output_buffer = [0.0f64; 1024];
 
     for _ in 0..(44100 / block_size() * output_channels) {
-        process_raw_double(&input_buffer, &mut output_buffer);
+        ctx.process_raw_double(&input_buffer, &mut output_buffer);
     }
 
     let sum = output_buffer.iter().fold(0_f64, |mut acc, element| {
@@ -114,7 +109,7 @@ fn all_process_functions() {
     let mut output_buffer = [0_i16; 1024];
 
     for _ in 0..(44100 / block_size() * output_channels) {
-        process_raw_short(&input_buffer, &mut output_buffer);
+        ctx.process_raw_short(&input_buffer, &mut output_buffer);
     }
 
     let sum = output_buffer.iter().fold(0_i32, |mut acc, element| {
@@ -125,5 +120,5 @@ fn all_process_functions() {
     assert_eq!(type_of(output_buffer[0]), "i16");
     assert_ne!(sum, 0);
 
-    close_patch(patch_handle).unwrap();
+    pd.close_patch().unwrap();
 }
