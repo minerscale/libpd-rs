@@ -23,7 +23,7 @@ doc = true
 crate-type = ["lib"]
 
 [dependencies]
-libpd-sys = "0.3"
+libpd-sys = { git = "https://github.com/minerscale/libpd-sys.git" }
 thiserror = "2"
 libffi = "4.1.0"
 tempfile = "3.3.0"
